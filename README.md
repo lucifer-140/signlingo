@@ -24,7 +24,7 @@
 
 1.  **Clone the Repository**
     ```bash
-    git clone https://github.com/yourusername/signlingo.git
+    git clone https://github.com/lucifer-140/signlingo.git
     cd signlingo
     ```
 
