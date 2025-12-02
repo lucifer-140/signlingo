@@ -7,10 +7,25 @@ X=torch.tensor(data["X"],dtype=torch.float32)  # (N,32,111)
 y=torch.tensor(data["y"],dtype=torch.long)
 classes=list(data["classes"]); C=len(classes); F=X.shape[-1]
 
+# --- Augmentation Helper ---
+def augment(x):
+    """Apply random noise and scaling to the batch."""
+    # x shape: (Batch, 32, 111)
+    
+    # 1. Random Noise (jitter)
+    noise = torch.randn_like(x) * 0.02
+    
+    # 2. Random Scaling (simulate distance)
+    # Scale factor between 0.95 and 1.05
+    scale = 1.0 + (torch.rand(x.size(0), 1, 1, device=x.device) - 0.5) * 0.1
+    
+    return x * scale + noise
+
 class TinyLSTM(nn.Module):
-    def __init__(self, in_dim, num_classes, hidden=64):
+    def __init__(self, in_dim, num_classes, hidden=32):
         super().__init__()
-        self.lstm=nn.LSTM(in_dim,hidden,2,batch_first=True,bidirectional=True,dropout=0.1)
+        # Increased dropout to 0.3 for better regularization
+        self.lstm=nn.LSTM(in_dim,hidden,2,batch_first=True,bidirectional=True,dropout=0.3)
         self.fc=nn.Sequential(nn.LayerNorm(hidden*2), nn.Linear(hidden*2,num_classes))
     def forward(self,x):
         y,_=self.lstm(x); y=y[:,-1,:]; return self.fc(y)
@@ -22,14 +37,19 @@ dl = DataLoader(train,batch_size=64,shuffle=True)
 vl = DataLoader(val,batch_size=128); tl = DataLoader(test,batch_size=128)
 
 dev="cuda" if torch.cuda.is_available() else "cpu"
-m=TinyLSTM(F,C).to(dev); opt=torch.optim.AdamW(m.parameters(),lr=1e-3,weight_decay=1e-4)
+m=TinyLSTM(F,C).to(dev); opt=torch.optim.AdamW(m.parameters(),lr=1e-3,weight_decay=1e-3)
 crit=nn.CrossEntropyLoss(label_smoothing=0.05)
 
 best=(0,None)
-for e in range(20):
+for e in range(30): # Increased epochs slightly to accommodate harder task (augmentation)
     m.train(); tloss=tacc=0
     for xb,yb in dl:
-        xb,yb=xb.to(dev),yb.to(dev); opt.zero_grad()
+        xb,yb=xb.to(dev),yb.to(dev)
+        
+        # Apply augmentation only during training
+        xb = augment(xb)
+        
+        opt.zero_grad()
         lo=m(xb); loss=crit(lo,yb); loss.backward(); opt.step()
         tloss+=loss.item()*xb.size(0); tacc+=(lo.argmax(1)==yb).sum().item()
     tloss/=len(dl.dataset); tacc/=len(dl.dataset)

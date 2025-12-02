@@ -9,6 +9,7 @@
 *   **Real-time Detection**: Instantly translates sign language gestures into text.
 *   **Deep Learning Model**: Utilizes a custom-trained Bidirectional LSTM model for accurate sequence classification.
 *   **Holistic Tracking**: Integrates MediaPipe Holistic to track face, pose, and hand landmarks simultaneously.
+*   **Interactive Controls**: Supports both Mouse (on-screen buttons) and Keyboard controls.
 *   **Visual Feedback**: Displays tracking lines, bounding boxes, and confidence scores on the HUD.
 
 ## Prerequisites
@@ -51,10 +52,13 @@ python scripts/infer_webcam.py
 ```
 
 ### Controls
-*   `ESC`: Quit the application.
-*   `t`: Toggle tracking lines (skeleton visualization).
-*   `b`: Toggle bounding boxes.
-*   `[` / `]`: Decrease / Increase the confidence threshold.
+You can control the application using **Mouse Clicks** on the on-screen buttons or via **Keyboard Shortcuts**:
+
+*   **[TRACK] / T**: Toggle tracking lines (skeleton visualization).
+*   **[BOX] / B**: Toggle bounding boxes.
+*   **[-] / [ ]**: Decrease confidence threshold.
+*   **[+] / ]**: Increase confidence threshold.
+*   **[QUIT] / Q / ESC**: Quit the application.
 
 ## How It Works (Technical Explanation)
 
@@ -71,16 +75,16 @@ The application does not process raw pixels directly for classification, as this
 *   **Total Feature Vector**: These are concatenated into a single **111-dimensional vector** per frame.
 *   **Sequence Processing**: The model expects a fixed sequence length. We use a sliding window approach (or padding/trimming during training) to create sequences of **32 frames**.
 
-### 2. Model Architecture (`scripts/train_mini_lstm.py`)
-The core of the recognition system is a **TinyLSTM** neural network designed for efficiency:
+### 2. Model Architecture & Training (`scripts/train_mini_lstm.py`)
+The core of the recognition system is a **TinyLSTM** neural network designed for efficiency and robustness:
 
+*   **Data Augmentation**: To improve accuracy without recording new data, we apply random **noise** and **scaling** to the keypoints during training. This forces the model to learn the general shape of gestures rather than memorizing exact positions.
 *   **Input Layer**: Accepts sequences of shape `(Batch, 32, 111)`.
-*   **LSTM Layer**: A **Bidirectional LSTM** (Long Short-Term Memory) with 64 hidden units. Bidirectional processing allows the model to understand the context of a gesture from both past and future frames within the window.
-*   **Regularization**: A dropout rate of 0.1 is applied to prevent overfitting.
+*   **LSTM Layer**: A **Bidirectional LSTM** with **32 hidden units** (optimized from 64 to prevent overfitting). Bidirectional processing allows the model to understand the context of a gesture from both past and future frames.
+*   **Regularization**: A higher dropout rate of **0.3** and weight decay are applied to ensure the model generalizes well to unseen data.
 *   **Classification Head**:
     *   **LayerNorm**: Normalizes the output of the LSTM to stabilize training.
-    *   **Linear Layer**: Maps the hidden states to the number of target classes (vocabulary size).
-*   **Training**: The model is trained using the **AdamW** optimizer and **CrossEntropyLoss**, with label smoothing to improve generalization.
+    *   **Linear Layer**: Maps the hidden states to the number of target classes.
 
 ### 3. Real-time Inference (`scripts/infer_webcam.py`)
 The inference script connects the webcam to the model:
@@ -90,7 +94,7 @@ The inference script connects the webcam to the model:
 3.  **Extract**: Converts landmarks into the 111-dim feature vector.
 4.  **Buffer**: Appends the vector to a rolling buffer of the last 32 frames.
 5.  **Predict**: Once the buffer is full, it is passed to the `TinyLSTM` model.
-6.  **Smooth**: Prediction probabilities are smoothed over time (Exponential Moving Average) to reduce flickering.
+6.  **Stability Check**: To reduce false positives (flickering), the system requires the model to predict the **same word for 5 consecutive frames** before displaying it.
 7.  **Display**: If the confidence score exceeds the threshold (default 0.60), the predicted word is displayed on the screen.
 
 ## Project Structure

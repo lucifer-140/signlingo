@@ -9,7 +9,7 @@ F          = int(ckpt.get("feat_dim", 111))
 
 # ---------- tiny model (must match training) ----------
 class TinyLSTM(torch.nn.Module):
-    def __init__(self, in_dim, num_classes, hidden=64):
+    def __init__(self, in_dim, num_classes, hidden=32):
         super().__init__()
         self.lstm = torch.nn.LSTM(in_dim, hidden, 2, batch_first=True, bidirectional=True, dropout=0.1)
         self.fc   = torch.nn.Sequential(torch.nn.LayerNorm(hidden*2), torch.nn.Linear(hidden*2, num_classes))
@@ -122,10 +122,10 @@ def draw_bbox(img, box, color=(255, 210, 70), thickness=2):
 # ---------- words & thresholds ----------
 SEQ_LEN    = 32
 SMOOTH_K   = 5
-THRESH     = 0.60
 
-TARGET_WORDS = ["HELLO","GOODBYE","PLEASE","THANK YOU","YES","NO"]
-NONE_NAMES   = {"NONE","None","idle","IDLE"}
+# Updated target words based on user training
+TARGET_WORDS = ["HELLO", "GOODBYE", "THANKYOU"]
+NONE_NAMES   = {"NONE", "None", "idle", "IDLE"}
 
 def _norm(s: str) -> str:
     return s.replace("_"," ").strip().upper()
@@ -133,34 +133,83 @@ def _norm(s: str) -> str:
 TARGET_NORM = {_norm(w) for w in TARGET_WORDS}
 NONE_NORM   = {_norm(w) for w in NONE_NAMES}
 
-# toggles
-SHOW_TRACK = True   # 't'
-SHOW_BBOX  = True   # 'b'
+# Global State
+state = {
+    "show_track": True,
+    "show_bbox": True,
+    "thresh": 0.60,
+    "quit": False,
+    "last_pred": None,
+    "consecutive": 0,
+    "stable_pred": None
+}
 
-mp_hol = mp.solutions.holistic
-buf, logits_hist = [], []
+# UI Buttons
+def get_buttons():
+    track_col = (0, 200, 0) if state["show_track"] else (100, 100, 100)
+    bbox_col  = (0, 200, 0) if state["show_bbox"] else (100, 100, 100)
+    
+    return [
+        {"id": "track", "x": 20,   "y": 650, "w": 140, "h": 50, "label": "TRACK (T)", "color": track_col, "text_color": (255,255,255)},
+        {"id": "bbox",  "x": 180,  "y": 650, "w": 140, "h": 50, "label": "BOX (B)",   "color": bbox_col,  "text_color": (255,255,255)},
+        {"id": "th_dn", "x": 340,  "y": 650, "w": 60,  "h": 50, "label": "-",         "color": (100,100,100), "text_color": (255,255,255)},
+        {"id": "th_up", "x": 480,  "y": 650, "w": 60,  "h": 50, "label": "+",         "color": (100,100,100), "text_color": (255,255,255)},
+        {"id": "quit",  "x": 1150, "y": 30,  "w": 100, "h": 40, "label": "QUIT (Q)",  "color": (50, 50, 50),  "text_color": (200,200,200)}
+    ]
 
-def draw_hud(img, thr):
+def draw_ui(img):
+    buttons = get_buttons()
+    for b in buttons:
+        x, y, w, h = b["x"], b["y"], b["w"], b["h"]
+        cv2.rectangle(img, (x, y), (x+w, y+h), b["color"], -1)
+        cv2.rectangle(img, (x, y), (x+w, y+h), (200,200,200), 2)
+        (tw, th), _ = cv2.getTextSize(b["label"], cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        tx = x + (w - tw) // 2
+        ty = y + (h + th) // 2
+        cv2.putText(img, b["label"], (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.6, b["text_color"], 2, cv2.LINE_AA)
+    
+    # Draw Threshold Value between - and +
+    cv2.putText(img, f"{state['thresh']:.2f}", (415, 685), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+    
+    # Draw Target Words List
     words_line = "Words: " + " | ".join(TARGET_WORDS)
-    put_label(img, words_line, (12, img.shape[0]-40), font_scale=0.65, thickness=1)
-    put_label(img, f"[T]rack:{'ON' if SHOW_TRACK else 'OFF'}  [B]ox:{'ON' if SHOW_BBOX else 'OFF'}  Threshold: {thr:.2f}  ([ / ] adjust, ESC quit)",
-              (12, img.shape[0]-12), font_scale=0.65, thickness=1)
+    put_label(img, words_line, (12, img.shape[0]-80), font_scale=0.65, thickness=1)
+
+def on_mouse(event, x, y, flags, param):
+    if event == cv2.EVENT_LBUTTONDOWN:
+        buttons = get_buttons()
+        for b in buttons:
+            if b["x"] <= x <= b["x"]+b["w"] and b["y"] <= y <= b["y"]+b["h"]:
+                if b["id"] == "track": state["show_track"] = not state["show_track"]
+                elif b["id"] == "bbox": state["show_bbox"] = not state["show_bbox"]
+                elif b["id"] == "th_dn": state["thresh"] = max(0.05, state["thresh"] - 0.05)
+                elif b["id"] == "th_up": state["thresh"] = min(0.95, state["thresh"] + 0.05)
+                elif b["id"] == "quit": state["quit"] = True
 
 # ---------- camera ----------
 DESIRED_W, DESIRED_H = 1280, 720
 win_name = "Sign word detector (silent until confident)"
 cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
 cv2.resizeWindow(win_name, DESIRED_W, DESIRED_H)
+cv2.setMouseCallback(win_name, on_mouse)
 
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  DESIRED_W)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, DESIRED_H)
 
+mp_hol = mp.solutions.holistic
+buf, logits_hist = [], []
+
 # smoothed bboxes
 bb_face = bb_l = bb_r = None
 
+print(f"Loaded classes: {classes}")
+print(f"Target words: {TARGET_WORDS}")
+
+STABILITY_FRAMES = 5  # Number of consecutive frames required
+
 with mp_hol.Holistic(model_complexity=1, smooth_landmarks=True) as hol:
-    while True:
+    while not state["quit"]:
         ok, fr = cap.read()
         if not ok: break
 
@@ -171,10 +220,10 @@ with mp_hol.Holistic(model_complexity=1, smooth_landmarks=True) as hol:
         disp = fr.copy()
 
         # motion tracking overlays
-        if SHOW_TRACK:
+        if state["show_track"]:
             draw_tracking(disp, res)
 
-        if SHOW_BBOX:
+        if state["show_bbox"]:
             cur_face = lms_to_bbox(res.face_landmarks, w, h, margin=0.08)
             cur_l    = lms_to_bbox(res.left_hand_landmarks,  w, h, margin=0.12)
             cur_r    = lms_to_bbox(res.right_hand_landmarks, w, h, margin=0.12)
@@ -206,18 +255,35 @@ with mp_hol.Holistic(model_complexity=1, smooth_landmarks=True) as hol:
             pred_raw = str(classes[k])
             pred = _norm(pred_raw)
 
-            if pred in TARGET_NORM and pred not in NONE_NORM and conf >= THRESH:
+            # Stability Check
+            if pred == state["last_pred"]:
+                state["consecutive"] += 1
+            else:
+                state["consecutive"] = 0
+                state["last_pred"] = pred
+            
+            if state["consecutive"] >= STABILITY_FRAMES:
+                state["stable_pred"] = pred
+            else:
+                # If unstable, maybe keep showing old one or show nothing?
+                # For responsiveness, we might want to clear it if it changes.
+                # But to avoid flickering, let's just not update stable_pred until new one is stable.
+                pass
+
+            # Display Logic
+            # Only show if stable prediction is valid, confident, and not NONE
+            if state["stable_pred"] in TARGET_NORM and state["stable_pred"] not in NONE_NORM and conf >= state["thresh"]:
                 put_label(disp, f"{pred_raw}  {conf*100:4.1f}%", (20, 50), font_scale=1.1)
 
-        draw_hud(disp, THRESH)
+        draw_ui(disp)
         cv2.imshow(win_name, disp)
 
         key = cv2.waitKey(1) & 0xFF
-        if key == 27: break               # ESC
-        elif key == ord(']'): THRESH = min(0.95, THRESH + 0.02)
-        elif key == ord('['): THRESH = max(0.05, THRESH - 0.02)
-        elif key in (ord('t'), ord('T')): SHOW_TRACK = not SHOW_TRACK
-        elif key in (ord('b'), ord('B')): SHOW_BBOX  = not SHOW_BBOX
+        if key == 27 or key in (ord('q'), ord('Q')): state["quit"] = True
+        elif key == ord(']'): state["thresh"] = min(0.95, state["thresh"] + 0.05)
+        elif key == ord('['): state["thresh"] = max(0.05, state["thresh"] - 0.05)
+        elif key in (ord('t'), ord('T')): state["show_track"] = not state["show_track"]
+        elif key in (ord('b'), ord('B')): state["show_bbox"]  = not state["show_bbox"]
 
 cap.release()
 cv2.destroyAllWindows()
