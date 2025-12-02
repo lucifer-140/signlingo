@@ -115,4 +115,3 @@ The inference script connects the webcam to the model:
 *   [ ] Develop a user-friendly GUI (Graphical User Interface).
 *   [ ] Implement Text-to-Speech integration.
 *   [ ] Optimize for mobile devices.
-
